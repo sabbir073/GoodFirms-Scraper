@@ -1,4 +1,3 @@
-const { By, Key, until } = require('selenium-webdriver');
 const HumanBehavior = require('./humanBehavior');
 const selectors = require('./selectors');
 const { writeCompanyRow, writeReviewRow } = require('../sheets/writer');
@@ -7,559 +6,849 @@ const ITEMS_PER_PAGE = parseInt(process.env.MAX_ITEMS_PER_PAGE) || 5;
 const PAGES_TO_SCRAPE = parseInt(process.env.MAX_PAGES) || 2;
 
 class GoodFirmsScraper {
-  constructor(driver) {
-    this.driver = driver;
-    this.human = new HumanBehavior(driver);
+  constructor(browser, page) {
+    this.browser = browser;
+    this.page = page;
+    this.human = new HumanBehavior(page);
   }
 
   async scrapeCompanyData() {
+    // Company ID - extract from URL
+    let companyId = '';
+    try {
+      const currentUrl = this.page.url();
+      // Handle both /company/ and /companies/ patterns
+      const urlMatch = currentUrl.match(/\/(?:company|companies)\/([^\/\?]+)/);
+      if (urlMatch) {
+        companyId = urlMatch[1];
+        console.log(`🏢 Company ID extracted: ${companyId}`);
+      } else {
+        console.log(`⚠️ Could not extract company ID from URL: ${currentUrl}`);
+      }
+    } catch (e) {
+      console.log(`❌ Failed to extract company ID: ${e.message}`);
+    }
+
     // Company Name
     let companyName = '';
     try {
       // Try multiple selectors for company name
-      try {
-        companyName = await this.driver.findElement(By.css(selectors.company.name)).getText();
-      } catch (e) {
-        for (const fallbackSelector of selectors.company.nameFallbacks) {
-          try {
-            companyName = await this.driver.findElement(By.css(fallbackSelector)).getText();
+      const nameSelectors = [
+        selectors.company.name,
+        'h1.company-name',
+        '.company-header h1',
+        'h1',
+        '.company-title'
+      ];
+      
+      for (const selector of nameSelectors) {
+        try {
+          const nameElement = await this.page.$(selector);
+          if (nameElement) {
+            companyName = await this.page.evaluate(el => el.textContent.trim(), nameElement);
+            if (companyName && companyName.length > 0) {
+              console.log(`✅ Company name found with selector ${selector}: ${companyName}`);
             break;
-          } catch (e2) {
-            continue;
+            }
           }
-        }
-        if (!companyName) {
-          // Try to get from page title as fallback
-          const pageTitle = await this.driver.getTitle();
-          companyName = pageTitle.split(' - ')[0] || pageTitle.split(' | ')[0] || '';
+        } catch (e) {
+          // Try next selector
         }
       }
-      console.log(`🏢 Company name captured: "${companyName}"`);
+      
+      // If still no name, try to extract from URL
+      if (!companyName || companyName.length === 0) {
+        const currentUrl = this.page.url();
+        const urlMatch = currentUrl.match(/\/(?:company|companies)\/([^\/\?]+)/);
+        if (urlMatch) {
+          companyName = urlMatch[1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+          console.log(`✅ Company name extracted from URL: ${companyName}`);
+        }
+      }
+      
+      // Last resort: try page title
+      if (!companyName || companyName.length === 0) {
+        const title = await this.page.title();
+        if (title && !title.includes('GoodFirms') && !title.includes('Top 100')) {
+          companyName = title.replace(/\s*-\s*GoodFirms.*$/, '').trim();
+          console.log(`✅ Company name extracted from title: ${companyName}`);
+        }
+      }
+      
+      if (!companyName || companyName.length === 0) {
+        console.log('❌ Could not extract company name');
+        return { companyName: 'Unknown', companyId, wasWritten: false };
+      }
     } catch (e) {
-      companyName = '';
-      console.log(`❌ Failed to capture company name: ${e.message}`);
+      console.log(`❌ Error extracting company name: ${e.message}`);
+      return { companyName: 'Unknown', companyId, wasWritten: false };
     }
-    console.log(`🏢 Scraping data for: ${companyName}`);
 
     // Total Reviews
     let totalReviews = '';
     try {
-      totalReviews = await this.driver.findElement(By.css(selectors.company.totalReviews)).getText();
+      const reviewsElement = await this.page.$(selectors.company.totalReviews);
+      if (reviewsElement) {
+        totalReviews = await this.page.evaluate(el => el.textContent.trim(), reviewsElement);
+        console.log(`📊 Total reviews: ${totalReviews}`);
+      }
     } catch (e) {
-      totalReviews = '';
+      console.log(`❌ Error extracting total reviews: ${e.message}`);
     }
 
     // Rating
     let rating = '';
     try {
-      rating = await this.driver.findElement(By.css(selectors.company.rating)).getText();
+      const ratingElement = await this.page.$(selectors.company.rating);
+      if (ratingElement) {
+        rating = await this.page.evaluate(el => el.textContent.trim(), ratingElement);
+        console.log(`⭐ Rating: ${rating}`);
+      }
     } catch (e) {
-      rating = '';
+      console.log(`❌ Error extracting rating: ${e.message}`);
     }
 
-    // Website URL
+    // Website
     let website = '';
     try {
-      website = await this.driver.findElement(By.css(selectors.company.website)).getAttribute('href');
+      const websiteElement = await this.page.$(selectors.company.website);
+      if (websiteElement) {
+        const fullUrl = await this.page.evaluate(el => el.href, websiteElement);
+        // Extract just the domain name from the URL
+        const urlMatch = fullUrl.match(/https?:\/\/([^\/\?]+)/);
+        if (urlMatch) {
+          website = urlMatch[1];
+        } else {
+          website = fullUrl;
+        }
+        console.log(`🌐 Website: ${website}`);
+      }
     } catch (e) {
-      website = '';
+      console.log(`❌ Error extracting website: ${e.message}`);
     }
 
-    // Address and Phone
+    // Address
     let address = '';
+    try {
+      const addressElement = await this.page.$(selectors.company.address);
+      if (addressElement) {
+        address = await this.page.evaluate(el => el.textContent.trim(), addressElement);
+        console.log(`📍 Address: ${address}`);
+      }
+    } catch (e) {
+      console.log(`❌ Error extracting address: ${e.message}`);
+    }
+
+    // Phone
     let phone = '';
     try {
-      const street = await this.driver.findElement(By.css(selectors.company.address.street)).getText();
-      const localityElements = await this.driver.findElements(By.css(selectors.company.address.locality));
-      let localities = [];
-      for (const el of localityElements) {
-        localities.push(await el.getText());
+      const phoneElement = await this.page.$(selectors.company.phone);
+      if (phoneElement) {
+        phone = await this.page.evaluate(el => el.textContent.trim(), phoneElement);
+        console.log(`📞 Phone: ${phone}`);
       }
-      const postalCode = await this.driver.findElement(By.css(selectors.company.address.postalCode)).getText();
-      const country = await this.driver.findElement(By.css(selectors.company.address.country)).getText();
-      address = `${street}, ${localities.join(', ')}, ${postalCode}, ${country}`;
     } catch (e) {
-      address = '';
-    }
-    try {
-      phone = await this.driver.findElement(By.css(selectors.company.phone)).getText();
-    } catch (e) {
-      phone = '';
+      console.log(`❌ Error extracting phone: ${e.message}`);
     }
 
     // Service Focus
     let serviceFocus = '';
     try {
-      const serviceItems = await this.driver.findElements(By.css(selectors.company.serviceFocus));
-      let focusArr = [];
-      for (const item of serviceItems) {
-        const spans = await item.findElements(By.css('span'));
-        if (spans.length >= 2) {
-          const name = await spans[0].getText();
-          const percent = await spans[1].getText();
-          focusArr.push(`${name} - ${percent}`);
-        }
+      console.log(`🔍 Using service focus selector: ${selectors.company.serviceFocus}`);
+      const serviceElements = await this.page.$$(selectors.company.serviceFocus);
+      console.log(`🔍 Found ${serviceElements.length} service focus elements`);
+      if (serviceElements.length > 0) {
+        const serviceList = await this.page.evaluate(elements => 
+          elements.map(el => el.getAttribute('data-name') || el.textContent.trim()).join(', '), serviceElements);
+        serviceFocus = serviceList;
+        console.log(`🔧 Service Focus: ${serviceFocus}`);
+      } else {
+        console.log('⚠️ No service focus elements found');
       }
-      serviceFocus = focusArr.join('; ');
     } catch (e) {
-      serviceFocus = '';
+      console.log(`❌ Error extracting service focus: ${e.message}`);
     }
 
     // Industry Focus
     let industryFocus = '';
     try {
-      const industryItems = await this.driver.findElements(By.css(selectors.company.industryFocus));
-      let industryArr = [];
-      for (const item of industryItems) {
-        industryArr.push(await item.getText());
+      console.log(`🔍 Using industry focus selector: ${selectors.company.industryFocus}`);
+      const industryElements = await this.page.$$(selectors.company.industryFocus);
+      console.log(`🔍 Found ${industryElements.length} industry focus elements`);
+      if (industryElements.length > 0) {
+        const industryList = await this.page.evaluate(elements => 
+          elements.map(el => el.textContent.trim()).join(', '), industryElements);
+        industryFocus = industryList;
+        console.log(`🏭 Industry Focus: ${industryFocus}`);
+      } else {
+        console.log('⚠️ No industry focus elements found');
       }
-      industryFocus = industryArr.join('; ');
     } catch (e) {
-      industryFocus = '';
+      console.log(`❌ Error extracting industry focus: ${e.message}`);
     }
 
     // Client Focus
     let clientFocus = '';
     try {
-      const clientItems = await this.driver.findElements(By.css(selectors.company.clientFocus));
-      let clientArr = [];
-      for (const item of clientItems) {
-        const text = await item.getText();
-        clientArr.push(text);
+      console.log(`🔍 Using client focus selector: ${selectors.company.clientFocus}`);
+      const clientElements = await this.page.$$(selectors.company.clientFocus);
+      console.log(`🔍 Found ${clientElements.length} client focus elements`);
+      if (clientElements.length > 0) {
+        const clientList = await this.page.evaluate(elements => 
+          elements.map(el => el.textContent.trim()).join(', '), clientElements);
+        clientFocus = clientList;
+        console.log(`👥 Client Focus: ${clientFocus}`);
+      } else {
+        console.log('⚠️ No client focus elements found');
       }
-      clientFocus = clientArr.join('; ');
     } catch (e) {
-      clientFocus = '';
+      console.log(`❌ Error extracting client focus: ${e.message}`);
     }
 
     // Write company row
-    await writeCompanyRow({
-      companyName, totalReviews, rating, website, address, phone, serviceFocus, industryFocus, clientFocus
+    const writeResult = await writeCompanyRow({
+      companyId, companyName, totalReviews, rating, website, address, phone, serviceFocus, industryFocus, clientFocus
     });
 
-    return companyName;
+    return { companyName, companyId, wasWritten: writeResult };
   }
 
-  async scrapeReviews(companyName) {
-    let hasMoreReviews = true;
-    let pageNumber = 1;
-    let processedReviews = new Set(); // Track processed reviews to avoid duplicates
-    const MAX_REVIEW_PAGES = 10; // Prevent infinite loops
-    
-    while (hasMoreReviews) {
-      try {
-        // Wait for reviews list to be present
-        await this.driver.wait(until.elementLocated(By.css(selectors.reviews.container)), 5000);
-        const reviewArticles = await this.driver.findElements(By.css(selectors.reviews.reviewItems));
-        console.log(`📝 Found ${reviewArticles.length} reviews on page ${pageNumber}`);
+  async scrapeReviews() {
+    try {
+      console.log('📝 Starting to scrape reviews...');
+      
+      const allReviews = [];
+      let currentPage = 1;
+      const maxPages = 10; // Safety limit to prevent infinite loops
+      
+      while (currentPage <= maxPages) {
+        console.log(`📄 Scraping reviews page ${currentPage}...`);
+        
+        // Wait for reviews to load
+        try {
+          await this.page.waitForSelector(selectors.reviews.container, { timeout: 10000 });
+        } catch (e) {
+          console.log('⚠️ No reviews found on this page');
+          break;
+        }
+        
+        const reviews = await this.page.$$(selectors.reviews.container);
+        console.log(`📝 Found ${reviews.length} reviews on page ${currentPage}`);
 
-        // Check if we're getting duplicate reviews (indicates we're stuck in a loop)
-        let newReviewsCount = 0;
+        if (reviews.length === 0) {
+          console.log('⚠️ No reviews found on this page, stopping pagination');
+          break;
+        }
 
-                  for (const review of reviewArticles) {
-            // Reviewer Name
+        // Extract reviews from current page
+        for (let i = 0; i < reviews.length; i++) {
+          try {
+            const review = reviews[i];
+            
+            // Extract review text
+            let reviewText = '';
+            try {
+              const textElement = await review.$(selectors.reviews.text);
+              if (textElement) {
+                reviewText = await textElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract review text for review ${i + 1}:`, e.message);
+            }
+
+            // Extract reviewer name
             let reviewerName = '';
             try {
-              reviewerName = await review.findElement(By.css(selectors.reviews.reviewerName)).getText();
-            } catch (e) {}
-
-            // Date Posted (visible)
-            let datePosted = '';
-            try {
-              datePosted = await review.findElement(By.css(selectors.reviews.datePosted)).getText();
-            } catch (e) {}
-
-            // Date Published (exact, from meta)
-            let datePublished = '';
-            try {
-              datePublished = await review.findElement(By.css(selectors.reviews.datePublished)).getAttribute('content');
-            } catch (e) {}
-
-            // Rating
-            let ratingGiven = '';
-            try {
-              const ratingSpan = await review.findElement(By.css(selectors.reviews.rating));
-              const style = await ratingSpan.getAttribute('style');
-              const match = style.match(/width:\s*(\d+)%/);
-              if (match) {
-                const percent = parseInt(match[1], 10);
-                ratingGiven = (percent / 20).toFixed(1); // 100% = 5.0
+              const authorElement = await review.$(selectors.reviews.author);
+              if (authorElement) {
+                reviewerName = await authorElement.evaluate(el => el.textContent.trim());
               }
-            } catch (e) {}
-
-            // Create a unique identifier for this review
-            const reviewId = `${reviewerName}-${datePosted}-${datePublished}`;
-            
-            // Only process if we haven't seen this review before
-            if (!processedReviews.has(reviewId)) {
-              processedReviews.add(reviewId);
-              newReviewsCount++;
-              
-              // Write review row
-              console.log(`📝 Writing review for company: "${companyName}"`);
-              await writeReviewRow({
-                companyName,
-                reviewerName,
-                datePosted,
-                datePublished,
-                ratingGiven
-              });
-            } else {
-              console.log(`⚠️ Skipping duplicate review: ${reviewerName}`);
-            }
-          }
-
-        // Check if we found any new reviews on this page
-        if (newReviewsCount === 0) {
-          console.log('⚠️ No new reviews found on this page, likely reached the end');
-          hasMoreReviews = false;
-        } else {
-          console.log(`✅ Processed ${newReviewsCount} new reviews on page ${pageNumber}`);
-        }
-
-        // Check if we've reached the maximum page limit
-        if (pageNumber >= MAX_REVIEW_PAGES) {
-          console.log(`⚠️ Reached maximum review pages limit (${MAX_REVIEW_PAGES}), stopping pagination`);
-          hasMoreReviews = false;
-        }
-
-        // Review pagination: check for next page button with improved handling
-        if (hasMoreReviews) {
-          let nextPageBtn;
-          try {
-            nextPageBtn = await this.driver.findElement(By.css(selectors.reviews.nextPageButton));
-          } catch (e) {
-            // Try fallback selectors
-            for (const fallbackSelector of selectors.reviews.nextPageButtonFallbacks) {
-              try {
-                nextPageBtn = await this.driver.findElement(By.css(fallbackSelector));
-                console.log(`✅ Found next page button with fallback selector: ${fallbackSelector}`);
-                break;
-              } catch (e2) {
-                continue;
-              }
-            }
-            if (!nextPageBtn) {
-              console.log('❌ No next page button found with any selector');
-            }
-          }
-          
-          if (nextPageBtn) {
-            console.log(`📄 Moving to page ${pageNumber + 1} of reviews...`);
-            
-            // Scroll to the button and wait for any overlays to clear
-            await this.driver.executeScript('arguments[0].scrollIntoView(true);', nextPageBtn);
-            await this.driver.sleep(1000);
-            
-            // Try multiple approaches to click the next page button
-            let clicked = false;
-            
-            // Approach 1: Direct click
-            try {
-              await nextPageBtn.click();
-              clicked = true;
-              console.log('✅ Next page clicked successfully');
             } catch (e) {
-              console.log('⚠️ Direct click failed, trying JavaScript click...');
+              console.log(`⚠️ Could not extract reviewer name for review ${i + 1}:`, e.message);
             }
-            
-            // Approach 2: JavaScript click
-            if (!clicked) {
-              try {
-                await this.driver.executeScript('arguments[0].click();', nextPageBtn);
-                clicked = true;
-                console.log('✅ Next page clicked via JavaScript');
-              } catch (e) {
-                console.log('⚠️ JavaScript click failed, trying href navigation...');
+
+            // Extract review date posted
+            let reviewDatePosted = '';
+            try {
+              const datePostedElement = await review.$(selectors.reviews.datePosted);
+              if (datePostedElement) {
+                reviewDatePosted = await datePostedElement.evaluate(el => el.textContent.trim());
               }
+            } catch (e) {
+              console.log(`⚠️ Could not extract review date posted for review ${i + 1}:`, e.message);
             }
-            
-            // Approach 3: Navigate directly using href
-            if (!clicked) {
-              try {
-                const href = await nextPageBtn.getAttribute('data-href');
-                if (href && href !== 'javascript:;') {
-                  await this.driver.get(href);
-                  clicked = true;
-                  console.log('✅ Navigated to next page via href');
+
+            // Extract review date published
+            let reviewDatePublished = '';
+            try {
+              const datePublishedElement = await review.$(selectors.reviews.datePublished);
+              if (datePublishedElement) {
+                reviewDatePublished = await datePublishedElement.evaluate(el => el.getAttribute('content'));
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract review date published for review ${i + 1}:`, e.message);
+            }
+
+            // Extract review title
+            let reviewTitle = '';
+            try {
+              const titleElement = await review.$(selectors.reviews.title);
+              if (titleElement) {
+                reviewTitle = await titleElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract review title for review ${i + 1}:`, e.message);
+            }
+
+            // Extract rating (overall rating from the last item in the breakdown)
+            let rating = '';
+            try {
+              const ratingElement = await review.$(selectors.reviews.rating);
+              if (ratingElement) {
+                const style = await ratingElement.evaluate(el => el.style.width);
+                if (style) {
+                  // Convert percentage to rating (e.g., "100%" = 5.0, "80%" = 4.0)
+                  const percentage = parseInt(style.replace('%', ''));
+                  rating = (percentage / 20).toFixed(1); // 100% = 5 stars, 80% = 4 stars, etc.
                 }
-              } catch (e) {
-                console.log('⚠️ Href navigation failed');
               }
+            } catch (e) {
+              console.log(`⚠️ Could not extract rating for review ${i + 1}:`, e.message);
             }
-            
-            if (clicked) {
-              pageNumber++;
-              await this.driver.sleep(2000);
-            } else {
-              console.log('❌ Could not navigate to next page, stopping review pagination');
-              hasMoreReviews = false;
+
+            // Extract project details
+            let projectName = '';
+            try {
+              const projectNameElement = await review.$(selectors.reviews.projectName);
+              if (projectNameElement) {
+                projectName = await projectNameElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract project name for review ${i + 1}:`, e.message);
             }
-          } else {
-            console.log('✅ No more review pages');
-            hasMoreReviews = false;
+
+            let services = '';
+            try {
+              const servicesElement = await review.$(selectors.reviews.services);
+              if (servicesElement) {
+                services = await servicesElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract services for review ${i + 1}:`, e.message);
+            }
+
+            let projectDescription = '';
+            try {
+              const projectDescElement = await review.$(selectors.reviews.projectDescription);
+              if (projectDescElement) {
+                projectDescription = await projectDescElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract project description for review ${i + 1}:`, e.message);
+            }
+
+            let likedMost = '';
+            try {
+              const likedMostElement = await review.$(selectors.reviews.likedMost);
+              if (likedMostElement) {
+                likedMost = await likedMostElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract liked most for review ${i + 1}:`, e.message);
+            }
+
+            let likedLeast = '';
+            try {
+              const likedLeastElement = await review.$(selectors.reviews.likedLeast);
+              if (likedLeastElement) {
+                likedLeast = await likedLeastElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract liked least for review ${i + 1}:`, e.message);
+            }
+
+            let projectCost = '';
+            try {
+              const projectCostElement = await review.$(selectors.reviews.projectCost);
+              if (projectCostElement) {
+                projectCost = await projectCostElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract project cost for review ${i + 1}:`, e.message);
+            }
+
+            let projectStatus = '';
+            try {
+              const projectStatusElement = await review.$(selectors.reviews.projectStatus);
+              if (projectStatusElement) {
+                projectStatus = await projectStatusElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract project status for review ${i + 1}:`, e.message);
+            }
+
+            let projectIndustry = '';
+            try {
+              const projectIndustryElement = await review.$(selectors.reviews.projectIndustry);
+              if (projectIndustryElement) {
+                projectIndustry = await projectIndustryElement.evaluate(el => el.textContent.trim());
+              }
+            } catch (e) {
+              console.log(`⚠️ Could not extract project industry for review ${i + 1}:`, e.message);
+            }
+
+            // Only add review if we have at least some data
+            if (reviewText || reviewerName || reviewTitle) {
+              allReviews.push({
+                text: reviewText,
+                author: reviewerName,
+                datePosted: reviewDatePosted,
+                datePublished: reviewDatePublished,
+                title: reviewTitle,
+                rating: rating,
+                projectName: projectName,
+                services: services,
+                projectDescription: projectDescription,
+                likedMost: likedMost,
+                likedLeast: likedLeast,
+                projectCost: projectCost,
+                projectStatus: projectStatus,
+                projectIndustry: projectIndustry
+              });
+              
+              console.log(`✅ Extracted review ${i + 1} on page ${currentPage}: ${reviewerName || 'Unknown'} - ${reviewTitle || 'No title'}`);
+            }
+
+          } catch (e) {
+            console.log(`❌ Error extracting review ${i + 1} on page ${currentPage}:`, e.message);
           }
         }
-      } catch (e) {
-        console.log('⚠️ Error processing reviews:', e.message);
-        hasMoreReviews = false;
+
+        // Check if there's a next page
+        const nextPageButton = await this.page.$(selectors.pagination.nextPage);
+        if (nextPageButton) {
+          console.log(`➡️ Found next page button, clicking to page ${currentPage + 1}...`);
+          await nextPageButton.click();
+          await this.page.waitForTimeout(2000); // Wait for page to load
+          currentPage++;
+        } else {
+          console.log('🏁 No next page found, stopping pagination');
+          break;
+        }
       }
+
+      console.log(`📝 Successfully extracted ${allReviews.length} total reviews across ${currentPage - 1} pages`);
+      return allReviews;
+
+    } catch (e) {
+      console.log('❌ Error scraping reviews:', e.message);
+      return [];
     }
   }
 
   async searchAndScrape(keyword, location) {
-    console.log(`🔍 Processing: "${keyword}" in "${location}"`);
     try {
-      console.log('🌐 Opening GoodFirms homepage...');
-      await this.driver.get('https://www.goodfirms.co/');
-      console.log('✅ GoodFirms homepage loaded');
-
-      // Enter keyword
-      console.log('🔤 Entering keyword...');
-      const searchInput = await this.driver.findElement(By.css(selectors.search.keywordInput));
-      await searchInput.clear();
-      await this.driver.sleep(500);
+      console.log(`🔍 Starting search for: ${keyword} in ${location}`);
       
-      // Click on the input to ensure it's focused
-      await searchInput.click();
-      await this.driver.sleep(300);
+      // Step 1: Go to GoodFirms homepage
+      console.log('🏠 Navigating to GoodFirms homepage...');
+      await this.page.goto('https://www.goodfirms.co/', { waitUntil: 'networkidle2' });
+      await this.human.randomSleep();
       
-      // Type the keyword character by character to avoid auto-suggestions
-      await this.human.typeHuman(searchInput, keyword);
-      console.log(`✅ Keyword "${keyword}" entered`);
+      // Step 2: Find and click the keyword search input
+      console.log('🔤 Looking for keyword search input...');
+      await this.page.waitForSelector(selectors.search.keywordInput, { timeout: 10000 });
       
-      // Wait a moment for any suggestions to appear
-      await this.driver.sleep(1000);
+      // Click on the search input to focus it
+      await this.human.clickHuman(selectors.search.keywordInput);
+      await this.human.sleep(500, 1000);
       
-      // Check if there are any suggestion dropdowns and dismiss them
+      // Step 3: Type the keyword with human-like behavior
+      console.log(`⌨️ Typing keyword: ${keyword}`);
+      await this.human.typeHuman(selectors.search.keywordInput, keyword);
+      await this.human.sleep(1000, 2000);
+      
+      // Step 4: Wait for dropdown and select the matching option
+      console.log('📋 Waiting for dropdown suggestions...');
+      await this.human.sleep(1000, 2000);
+      
+      // Try to find and click on a matching dropdown item
       try {
-        const suggestions = await this.driver.findElements(By.css('.suggestion-item, .autocomplete-item, [class*="suggestion"], [class*="autocomplete"]'));
-        if (suggestions.length > 0) {
-          console.log('⚠️ Found suggestions, pressing Escape to dismiss...');
-          await searchInput.sendKeys(Key.ESCAPE);
-          await this.driver.sleep(500);
-        }
-      } catch (e) {
-        // No suggestions found, continue
-      }
-      
-      // Alternative approach: Try to find and click a search button instead of pressing Enter
-      try {
-        const searchButton = await this.driver.findElement(By.css('button[type="submit"], .search-btn, [class*="search"] button'));
-        console.log('🔍 Found search button, clicking it...');
-        await searchButton.click();
-        console.log('✅ Search submitted via button click');
-      } catch (e) {
-        // No search button found, use Enter key
-        console.log('🔍 No search button found, using Enter key...');
-        await searchInput.sendKeys(Key.ENTER);
-        console.log('✅ Search submitted via Enter key');
-      }
-
-      // Enter location
-      console.log('📍 Entering location...');
-      const locationInput = await this.driver.findElement(By.css(selectors.search.locationInput));
-      await locationInput.clear();
-      await locationInput.sendKeys(location);
-      console.log(`✅ Location "${location}" entered`);
-      await locationInput.sendKeys(Key.ENTER);
-      console.log('✅ Location submitted');
-
-      await this.driver.sleep(1000);
-      console.log('⏳ Waiting for search results...');
-      
-      // Debug: Check what was actually entered in the search field
-      try {
-        const actualKeyword = await searchInput.getAttribute('value');
-        console.log(`🔍 Debug: Actual keyword in search field: "${actualKeyword}"`);
-        if (actualKeyword !== keyword) {
-          console.log(`⚠️ Warning: Expected "${keyword}" but found "${actualKeyword}" in search field`);
-        }
-      } catch (e) {
-        console.log('⚠️ Could not verify search field value');
-      }
-
-      // Wait for manual Cloudflare verification
-      console.log('⏰ Waiting 15 seconds for manual Cloudflare verification...');
-      console.log('🔍 PLEASE COMPLETE ANY CAPTCHA OR VERIFICATION NOW!');
-      console.log('🔍 The browser window should be visible - please interact with it if needed');
-
-      try {
-        await this.driver.sleep(15000);
-        await this.driver.getCurrentUrl();
-        const pageTitleAfterWait = await this.driver.getTitle();
-        console.log(`📄 Page title after wait: ${pageTitleAfterWait}`);
-
-        if (pageTitleAfterWait.includes('Just a moment') || pageTitleAfterWait.includes('Checking')) {
-          console.log('⚠️ Cloudflare still blocking. Please complete verification manually and press Enter to continue...');
-          await new Promise(resolve => {
-            process.stdin.once('data', () => resolve());
-          });
-        }
-      } catch (browserError) {
-        console.error('❌ Browser was closed or disconnected during verification:', browserError.message);
-        console.log('🔄 Restarting browser...');
-        await this.driver.quit();
-        const { connectChrome } = require('../chrome/connectChrome');
-        this.driver = await connectChrome();
-        this.human = new HumanBehavior(this.driver);
-        console.log('✅ Browser restarted successfully');
-      }
-
-      // Debug: Check current URL and page content
-      const currentUrl = await this.driver.getCurrentUrl();
-      console.log(`🔗 Current URL: ${currentUrl}`);
-      const pageTitle = await this.driver.getTitle();
-      console.log(`📄 Page title: ${pageTitle}`);
-      
-      // Debug: Check if there's a search term or category displayed on the page
-      try {
-        const searchTermElements = await this.driver.findElements(By.css('h1, .search-term, .category-name, [class*="search"], [class*="category"]'));
-        for (const element of searchTermElements) {
-          const text = await element.getText();
-          if (text && text.toLowerCase().includes('development')) {
-            console.log(`🔍 Debug: Found search/category text: "${text}"`);
-          }
-        }
+        const dropdownItems = await this.page.$$(selectors.search.dropdownItem);
+        console.log(`📋 Found ${dropdownItems.length} dropdown items`);
         
-        // Additional check: Look for breadcrumbs or navigation that might show the search term
-        const breadcrumbElements = await this.driver.findElements(By.css('.breadcrumb, .nav-breadcrumb, [class*="breadcrumb"]'));
-        for (const element of breadcrumbElements) {
-          const text = await element.getText();
-          console.log(`🔍 Debug: Breadcrumb text: "${text}"`);
-        }
-      } catch (e) {
-        console.log('⚠️ Could not check for search/category text');
-      }
-      
-      // Verify we're on a search results page and check for wrong category
-      const pageSource = await this.driver.getPageSource();
-      const initialUrl = await this.driver.getCurrentUrl();
-      const initialTitle = await this.driver.getTitle();
-      
-      // Check if we're on the wrong category page
-      const isWrongCategory = (
-        (pageSource.toLowerCase().includes('mobile app development') && !pageSource.toLowerCase().includes('web development')) ||
-        initialUrl.includes('/app-development') ||
-        initialTitle.toLowerCase().includes('mobile app development')
-      );
-      
-      if (isWrongCategory) {
-        console.log('⚠️ WARNING: Page seems to be showing mobile app development instead of web development!');
-        console.log('🔄 Attempting to correct the search...');
-        
-        // Try multiple approaches to get to web development
-        const searchAttempts = [
-          'web development services',
-          'web development companies',
-          'website development',
-          'web application development',
-          'custom web development'
-        ];
-        
-        for (const attempt of searchAttempts) {
-          console.log(`🔄 Trying search term: "${attempt}"`);
+        let selected = false;
+        for (const item of dropdownItems) {
+          const itemText = await this.page.evaluate(el => el.textContent.trim(), item);
+          console.log(`📋 Dropdown item: "${itemText}"`);
           
-          // Go back to homepage
-          await this.driver.get('https://www.goodfirms.co/');
-          await this.driver.sleep(2000);
-          
-          const searchInput = await this.driver.findElement(By.css(selectors.search.keywordInput));
-          await searchInput.clear();
-          await searchInput.click();
-          await this.driver.sleep(300);
-          
-          await this.human.typeHuman(searchInput, attempt);
-          console.log(`✅ Entered keyword: "${attempt}"`);
-          
-          await this.driver.sleep(1000);
-          await searchInput.sendKeys(Key.ENTER);
-          await this.driver.sleep(3000);
-          
-                     // Check if this attempt worked
-           const newPageSource = await this.driver.getPageSource();
-           const attemptUrl = await this.driver.getCurrentUrl();
-           const attemptTitle = await this.driver.getTitle();
-          
-                     const isCorrectCategory = (
-             newPageSource.toLowerCase().includes('web development') ||
-             newPageSource.toLowerCase().includes('website development') ||
-             attemptUrl.includes('/web-development') ||
-             attemptTitle.toLowerCase().includes('web development')
-           );
-          
-          if (isCorrectCategory) {
-            console.log(`✅ Success! Found web development results with term: "${attempt}"`);
+          // Check if this item matches our keyword (case-insensitive)
+          if (itemText.toLowerCase().includes(keyword.toLowerCase())) {
+            console.log(`✅ Found matching dropdown item: "${itemText}"`);
+            await item.click();
+            selected = true;
             break;
-          } else {
-            console.log(`❌ Still on wrong category with term: "${attempt}"`);
           }
         }
-      }
-
-      // Iterate pages
-      for (let page = 1; page <= PAGES_TO_SCRAPE; page++) {
-        console.log(`📄 Processing page ${page} of ${PAGES_TO_SCRAPE}`);
         
-        // Find all result items
-        let resultItems = [];
-        resultItems = await this.driver.findElements(By.css(selectors.results.companyItems));
-        console.log(`🏢 Found ${resultItems.length} companies with '${selectors.results.companyItems}'`);
-
-        if (resultItems.length === 0) {
-          resultItems = await this.driver.findElements(By.css(selectors.results.companyItemsFallback));
-          console.log(`🏢 Found ${resultItems.length} companies with '${selectors.results.companyItemsFallback}'`);
+        if (!selected) {
+          console.log('⚠️ No exact match found in dropdown, continuing with typed text');
         }
-
-        if (resultItems.length === 0) {
-          resultItems = await this.driver.findElements(By.css(selectors.results.companyItemsGeneric));
-          console.log(`🏢 Found ${resultItems.length} companies with '${selectors.results.companyItemsGeneric}'`);
+      } catch (e) {
+        console.log('⚠️ Could not find dropdown items, continuing with typed text');
+      }
+      
+      await this.human.sleep(1000, 2000);
+      
+      // Step 5: Find and click the location search input
+      console.log('📍 Looking for location search input...');
+      await this.page.waitForSelector(selectors.search.locationInput, { timeout: 10000 });
+      
+      // Click on the location input to focus it
+      await this.human.clickHuman(selectors.search.locationInput);
+      await this.human.sleep(500, 1000);
+      
+      // Step 6: Type the location
+      console.log(`⌨️ Typing location: ${location}`);
+      await this.human.typeHuman(selectors.search.locationInput, location);
+      await this.human.sleep(1000, 2000);
+      
+      // Step 7: Submit the search using the "Find Companies" button
+      console.log('🔍 Submitting search...');
+      
+      // Click the "Find Companies" button
+      console.log('🔘 Looking for "Find Companies" button...');
+      try {
+        const searchButton = await this.page.$(selectors.search.searchButton);
+        if (searchButton) {
+          console.log('🔘 Found "Find Companies" button, clicking it...');
+          await searchButton.click();
+          await this.page.waitForTimeout(3000);
+          let currentUrl = this.page.url();
+          console.log(`🔗 Current URL after button click: ${currentUrl}`);
+          
+          // Check if we're on a search results page
+          if (currentUrl.includes('/companies/') || currentUrl.includes('/search') || currentUrl.includes('keyword=')) {
+            console.log('✅ Successfully navigated to search results page');
+          } else {
+            console.log('⚠️ Button click did not navigate to expected search results page');
+          }
+        } else {
+          console.log('⚠️ "Find Companies" button not found');
         }
-
-        console.log(`🏢 Final result: Found ${resultItems.length} companies on page ${page}`);
-
-        for (let item = 0; item < Math.min(ITEMS_PER_PAGE, resultItems.length); item++) {
-          console.log(`🏢 Processing company ${item + 1} of ${Math.min(ITEMS_PER_PAGE, resultItems.length)}`);
-          let resultItem = resultItems[item];
-
-          // Click 'View Profile' button with fallbacks
-          let viewProfileBtn;
+      } catch (e) {
+        console.log('⚠️ Error clicking "Find Companies" button:', e.message);
+      }
+      
+      // Step 8: Start scraping the results
+      console.log('📄 Starting to scrape search results...');
+      
+      // Debug: Check what page we're on and what elements are available
+      const pageTitle = await this.page.title();
+      console.log(`📄 Page title: ${pageTitle}`);
+      const currentUrl = this.page.url();
+      console.log(`🔗 Current URL: ${currentUrl}`);
+      
+      // Try to find any company-related elements on the page
+      const possibleSelectors = [
+        'li.firm-wrapper.observed',
+        '.firm-wrapper',
+        '[class*="firm"]',
+        '.company-item',
+        '.search-result-item',
+        '.company-card',
+        '[class*="company"]',
+        '[class*="result"]'
+      ];
+      
+      let foundElements = 0;
+      for (const selector of possibleSelectors) {
+        try {
+          const elements = await this.page.$$(selector);
+          if (elements.length > 0) {
+            console.log(`✅ Found ${elements.length} elements with selector: ${selector}`);
+            foundElements += elements.length;
+          }
+        } catch (e) {
+          // Selector not found, continue
+        }
+      }
+      
+      if (foundElements === 0) {
+        console.log('⚠️ No company elements found on current page');
+      }
+      
+      for (let pageNum = 1; pageNum <= PAGES_TO_SCRAPE; pageNum++) {
+        console.log(`📄 Processing page ${pageNum}`);
+        
+        // Wait for search results to load with multiple selector attempts
+        let resultsFound = false;
+        for (const selector of possibleSelectors) {
           try {
-            viewProfileBtn = await resultItem.findElement(By.css(selectors.results.viewProfileButton));
+            await this.page.waitForSelector(selector, { timeout: 5000 });
+            console.log(`✅ Found results with selector: ${selector}`);
+            resultsFound = true;
+            break;
           } catch (e) {
-            // Try fallback selectors
-            for (const fallbackSelector of selectors.results.viewProfileButtonFallbacks) {
+            // Try next selector
+          }
+        }
+        
+        if (!resultsFound) {
+          console.log('⚠️ Could not find search results, checking if we need to handle Cloudflare...');
+          // Check if we're on a Cloudflare page
+          const pageTitle = await this.page.title();
+          if (pageTitle.includes('Just a moment') || pageTitle.includes('Checking')) {
+            console.log('🛡️ Cloudflare detected, waiting for manual verification...');
+            console.log('🔍 PLEASE COMPLETE ANY CAPTCHA OR VERIFICATION NOW!');
+            await this.human.sleep(15000, 20000); // Wait 15-20 seconds for manual verification
+          }
+          
+          // Try waiting for results again
+          for (const selector of possibleSelectors) {
+            try {
+              await this.page.waitForSelector(selector, { timeout: 10000 });
+              console.log(`✅ Found results after Cloudflare with selector: ${selector}`);
+              resultsFound = true;
+            break;
+            } catch (e) {
+              // Try next selector
+            }
+          }
+        }
+        
+        if (!resultsFound) {
+          console.log('❌ Could not find any search results on this page');
+          break;
+        }
+        
+        // Get all company cards using the first working selector
+        let companyCards = [];
+        for (const selector of possibleSelectors) {
+          try {
+            companyCards = await this.page.$$(selector);
+            if (companyCards.length > 0) {
+              console.log(`🏢 Found ${companyCards.length} companies with selector: ${selector}`);
+              break;
+            }
+          } catch (e) {
+            // Try next selector
+          }
+        }
+        
+        if (companyCards.length === 0) {
+          console.log('❌ No company cards found, stopping pagination');
+          break;
+        }
+
+        for (let i = 0; i < Math.min(companyCards.length, ITEMS_PER_PAGE); i++) {
+          try {
+            console.log(`🏢 Processing company ${i + 1}/${Math.min(companyCards.length, ITEMS_PER_PAGE)}`);
+            
+            // Get the current company card
+            const currentCard = companyCards[i];
+            
+            if (!currentCard) {
+              console.log(`⚠️ Company card ${i + 1} not found, skipping...`);
+              continue;
+            }
+
+            // Look specifically for the "View Profile" link
+            console.log('🔍 Looking for "View Profile" link...');
+            
+            // Try multiple selectors for the View Profile link
+            const viewProfileSelectors = [
+              'a.visit-profile.transBG-link.js-no-modal-overlay[title*="Profile"]',
+              'a.visit-profile',
+              'a[href*="/company/"]',
+              'a[href*="/profile/"]',
+              '.visit-profile',
+              '[class*="profile"] a',
+              'a[title*="Profile"]',
+              'a[title*="View"]',
+              'a[href*="goodfirms.co/company"]',
+              'a'
+            ];
+            
+            let viewProfileLink = null;
+            let usedSelector = '';
+            
+            for (const selector of viewProfileSelectors) {
               try {
-                viewProfileBtn = await resultItem.findElement(By.css(fallbackSelector));
-                console.log(`✅ Found profile button with fallback selector: ${fallbackSelector}`);
-                break;
-              } catch (e2) {
-                continue;
+                viewProfileLink = await currentCard.$(selector);
+                if (viewProfileLink) {
+                  // Verify it's actually a company profile link
+                  const href = await this.page.evaluate(el => el.href, viewProfileLink);
+                  if (href && (href.includes('/company/') || href.includes('/profile/'))) {
+                    usedSelector = selector;
+                    console.log(`✅ Found "View Profile" link with selector: ${selector}`);
+                    console.log(`🔗 Link href: ${href}`);
+                    break;
+                  }
+                }
+              } catch (e) {
+                // Try next selector
               }
             }
-            if (!viewProfileBtn) {
-              throw new Error('Could not find any profile button with any selector');
+            
+            if (!viewProfileLink) {
+              console.log(`⚠️ "View Profile" link not found for company ${i + 1}, trying to find any clickable link...`);
+              
+              // Try to find any link within the card
+              const allLinks = await currentCard.$$('a');
+              console.log(`🔍 Found ${allLinks.length} links in company card ${i + 1}`);
+              
+              for (let j = 0; j < allLinks.length; j++) {
+                try {
+                  const link = allLinks[j];
+                  const href = await this.page.evaluate(el => el.href, link);
+                  const text = await this.page.evaluate(el => el.textContent.trim(), link);
+                  
+                  console.log(`🔗 Link ${j + 1}: "${text}" -> ${href}`);
+                  
+                  if (href && (href.includes('/company/') || href.includes('/profile/') || text.toLowerCase().includes('profile') || text.toLowerCase().includes('view'))) {
+                    viewProfileLink = link;
+                    usedSelector = `link ${j + 1}`;
+                    console.log(`✅ Using link: "${text}" -> ${href}`);
+                    break;
+                  }
+                } catch (e) {
+                  // Try next link
+                }
+              }
+            }
+            
+            if (!viewProfileLink) {
+              console.log(`⚠️ No suitable "View Profile" link found for company ${i + 1}, skipping...`);
+              continue;
+            }
+
+            // Get the href before clicking to verify it's a company profile link
+            const href = await this.page.evaluate(el => el.href, viewProfileLink);
+            console.log(`🔗 View Profile link: ${href}`);
+            
+            if (!href || !(href.includes('/company/') || href.includes('/profile/'))) {
+              console.log(`⚠️ Link doesn't point to a company profile: ${href}`);
+              continue;
+            }
+
+            // Store the original page
+            const originalPage = this.page;
+            const originalPageCount = (await this.browser.pages()).length;
+            
+            console.log('🖱️ Clicking "View Profile" link to open new tab...');
+            
+            // Click the "View Profile" link to open new tab
+            await viewProfileLink.click();
+            
+            // Wait for new tab to open
+            await this.page.waitForTimeout(3000);
+            
+            // Get all pages and switch to the new one
+            const pages = await this.browser.pages();
+            const newPageCount = pages.length;
+            
+            if (newPageCount > originalPageCount) {
+              // New tab was opened, switch to it
+              this.page = pages[newPageCount - 1];
+              console.log('✅ Switched to new tab');
+            } else {
+              console.log('⚠️ No new tab opened, using current page');
+            }
+
+            // Wait for page to load
+            await this.page.waitForTimeout(3000);
+            
+            // Verify we're on a company profile page
+            const currentUrl = this.page.url();
+            console.log(`🔗 Current URL: ${currentUrl}`);
+            
+            if (!currentUrl.includes('/company/')) {
+              console.log('⚠️ Not on a company profile page, skipping...');
+              // Close tab if it was opened and go back to original
+              if (this.page !== originalPage) {
+                await this.page.close();
+                this.page = originalPage;
+              }
+              continue;
+            }
+            
+            console.log('📋 Starting to extract company data...');
+            
+            // Scrape company data
+            const { companyName, companyId, wasWritten } = await this.scrapeCompanyData();
+            
+            // Only scrape reviews if company was successfully written (not a duplicate)
+            if (wasWritten) {
+              console.log('📝 Scraping reviews...');
+              const reviews = await this.scrapeReviews();
+              for (const review of reviews) {
+                await writeReviewRow({
+                  companyName: await this.page.title(),
+                  author: review.author,
+                  rating: review.rating,
+                  datePosted: review.datePosted
+                });
+              }
+            } else {
+              console.log(`⏭️ Skipping reviews for duplicate company: ${companyName}`);
+            }
+
+            // Close the current tab and switch back to original
+            if (this.page !== originalPage) {
+              console.log('🔒 Closing tab and switching back to search results...');
+              await this.page.close();
+              this.page = originalPage;
+              console.log('✅ Back to search results page');
+            }
+
+            await this.human.randomSleep();
+            
+          } catch (e) {
+            console.log(`❌ Error processing company ${i + 1}: ${e.message}`);
+            
+            // Try to get back to the search results page
+            try {
+              const pages = await this.browser.pages();
+              if (pages.length > 1) {
+                // Close current tab and switch to first tab
+                await this.page.close();
+                this.page = pages[0];
+                console.log('✅ Recovered to search results page');
+              }
+            } catch (recoveryError) {
+              console.log(`❌ Error recovering from company processing error: ${recoveryError.message}`);
             }
           }
-          await this.driver.executeScript('window.open(arguments[0].href, "_blank");', viewProfileBtn);
-          const tabs = await this.driver.getAllWindowHandles();
-          await this.driver.switchTo().window(tabs[tabs.length - 1]);
-          console.log('📋 Switched to company profile tab');
+        }
 
-          // Scrape company info
-          const companyName = await this.scrapeCompanyData();
-
-          // Scrape reviews
-          await this.scrapeReviews(companyName);
-
-          // Close profile tab and switch back
-          await this.driver.close();
-          await this.driver.switchTo().window(tabs[0]);
-          console.log('🔙 Switched back to search results');
+        // Go to next page if not on last page
+        if (pageNum < PAGES_TO_SCRAPE) {
+          try {
+            const nextButton = await this.page.$(selectors.search.nextPage);
+            if (nextButton) {
+              await nextButton.click();
+              await this.page.waitForTimeout(3000);
+              await this.human.randomSleep();
+            } else {
+              console.log('⚠️ No next page button found, stopping pagination');
+              break;
+            }
+          } catch (e) {
+            console.log(`❌ Error navigating to next page: ${e.message}`);
+            break;
+          }
         }
       }
+      
+      console.log(`🎉 SCRAPING COMPLETED SUCCESSFULLY!`);
+      console.log(`✅ Finished scraping for: ${keyword} in ${location}`);
+      console.log(`📊 Data has been saved to Google Sheets`);
+      console.log(`🔗 Check your output sheet for company data and reviews sheet for review data`);
+      
     } catch (error) {
-      console.error(`❌ Error processing "${keyword}" in "${location}":`, error.message);
+      console.error(`❌ Error in searchAndScrape: ${error.message}`);
+      throw error;
     }
   }
 }

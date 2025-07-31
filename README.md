@@ -7,7 +7,7 @@ A modular GoodFirms scraper with Express API, WebSocket logging, and Google Shee
 ```
 goodfirms-scraper/
 │
-├─ credentials.json             # Google service account credentials (local only)
+├─ credentials.json             # Google service account credentials 
 │
 ├─ chrome/
 │   └─ connectChrome.js         # Connects to running signed-in Chrome via CDP

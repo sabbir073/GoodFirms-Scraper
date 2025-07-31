@@ -18,8 +18,8 @@ async function main() {
       return;
     }
     
-    let driver = await connectChrome();
-    const scraper = new GoodFirmsScraper(driver);
+    const { browser, page } = await connectChrome();
+    const scraper = new GoodFirmsScraper(browser, page);
     
     try {
       for (const { keyword, location } of inputRows) {
@@ -27,7 +27,7 @@ async function main() {
       }
       console.log('🏁 Scraping completed');
     } finally {
-      await driver.quit();
+      await browser.forceQuit();
     }
   } catch (error) {
     console.error('❌ Error:', error.message);
